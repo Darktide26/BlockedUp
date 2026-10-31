@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blockworld — Multiplayer Sandbox</title>
+<style>
+*{box-sizing:border-box}body{margin:0;overflow:hidden;background:#111827;color:#fff;font:14px system-ui,Segoe UI,sans-serif}
+#game{position:fixed;inset:0}#hud{position:fixed;inset:0;pointer-events:none}
+.panel{pointer-events:auto;background:#111c2ddd;border:1px solid #ffffff25;border-radius:12px;padding:12px;backdrop-filter:blur(8px)}
+#top{position:absolute;left:14px;top:14px;display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap}
+input,button{font:inherit;border:1px solid #ffffff25;border-radius:8px;padding:8px 10px;background:#182437;color:white}
+button{cursor:pointer;background:#2563eb;border-color:#2563eb}button.secondary{background:#26364c;border-color:#ffffff25}
+#status{font-size:12px;color:#b8c7da;margin-top:6px}
+#help{position:absolute;right:14px;top:14px;max-width:230px;line-height:1.5}
+#crosshair{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:22px;text-shadow:0 1px 4px #000}
+#hotbar{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:6px}
+.slot{width:52px;height:52px;border:2px solid #ffffff55;border-radius:8px;background:#111c2ddd;display:grid;place-items:center;font-size:11px;position:relative}
+.slot.active{border-color:#fff;box-shadow:0 0 0 2px #60a5fa}.swatch{width:22px;height:22px;border:1px solid #ffffff55;border-radius:4px}
+#chat{position:absolute;left:14px;bottom:14px;width:min(310px,calc(100vw - 28px));display:flex;flex-direction:column;gap:6px}
+#messages{max-height:120px;overflow:hidden;font-size:12px;text-shadow:0 1px 3px #000}
+#chatinput{width:100%;display:none}
+#toast{position:absolute;top:22%;left:50%;transform:translateX(-50%);background:#111c2ddd;padding:9px 14px;border-radius:8px;opacity:0;transition:opacity .2s}
+#lock{position:absolute;inset:0;display:grid;place-items:center;background:#07101acc;pointer-events:auto}
+#lock .panel{max-width:440px;text-align:center;padding:26px}#lock h1{margin:0 0 8px;font-size:30px}
+@media(max-width:650px){#help{display:none}.slot{width:43px;height:47px}#top{right:14px}}
+</style>
+</head>
+<body>
+<div id="game"></div><div id="hud">
+ <div id="top" class="panel">
+  <strong>🌿 BLOCKWORLD</strong>
+  <input id="room" maxlength="18" placeholder="Room code" value="forest-1" style="width:115px">
+  <button id="host">Host</button><button id="join" class="secondary">Join</button>
+  <span id="status">Not connected · Single-player</span>
+ </div>
+ <div id="help" class="panel"><b>Controls</b><br>WASD move · Mouse look<br>Space jump · Shift sprint<br>Left click break · Right click place<br>1–6 select block · Enter chat<br><small>Click the world to lock mouse</small></div>
+ <div id="crosshair">+</div><div id="hotbar"></div>
+ <div id="chat"><div id="messages"></div><input id="chatinput" placeholder="Message… (Enter to send)"></div>
+ <div id="toast"></div>
+ <div id="lock"><div class="panel"><h1>🌿 Blockworld</h1><p>A tiny multiplayer creative sandbox.</p><p>Host a room or join using the same room code as a friend.</p><button id="start">Play</button></div></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(()=> {
+const game=document.querySelector('#game'), status=document.querySelector('#status'), lock=document.querySelector('#lock'), toastEl=document.querySelector('#toast');
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x87c9f5);scene.fog=new THREE.Fog(0x87c9f5,35,95);
+const camera=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,.1,150);camera.position.set(0,3,6);
+const renderer=new THREE.WebGLRenderer({antialias:true});renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;game.appendChild(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xdaf0ff,0x68734a,2));const sun=new THREE.DirectionalLight(0xffffff,2.2);sun.position.set(-20,35,15);sun.castShadow=true;sun.shadow.mapSize.set(1024,1024);scene.add(sun);
+const mats=[0x69b34c,0x8b5a2b,0x888b91,0xd8c18a,0x3c91d8,0xe6b84a], names=['Grass','Dirt','Stone','Sand','Water','Wood'];
+const materials=mats.map(c=>new THREE.MeshLambertMaterial({color:c}));const cubeGeo=new THREE.BoxGeometry(1,1,1);
+const blocks=new Map(), meshes=new Map(), remote=new Map(), peers=new Map();let peer=null,host=false,roomName='',connected=false;
+const key=(x,y,z)=>`${x},${y},${z}`, parse=k=>k.split(',').map(Number);
+function addBlock(x,y,z,type=0,send=false){x=Math.round(x);y=Math.round(y);z=Math.round(z);let k=key(x,y,z);if(blocks.has(k))return;type=Math.max(0,Math.min(5,type|0));blocks.set(k,type);let m=new THREE.Mesh(cubeGeo,materials[type]);m.position.set(x,y,z);m.castShadow=type!==4;m.receiveShadow=true;scene.add(m);meshes.set(k,m);if(send)broadcast({t:'block',x,y,z,type});}
+function removeBlock(x,y,z,send=false){let k=key(Math.round(x),Math.round(y),Math.round(z));if(!blocks.has(k))return;scene.remove(meshes.get(k));meshes.delete(k);blocks.delete(k);if(send)broadcast({t:'remove',x,y,z});}
+function terrain(){for(let x=-18;x<=18;x++)for(let z=-18;z<=18;z++){let h=Math.floor( Math.sin(x*.23)*1.1+Math.cos(z*.19)*1.2+Math.sin((x+z)*.12)*.7 );for(let y=-2;y<=h;y++)addBlock(x,y,z,y===h?0:(y>h-3?1:2));if((x*x+z*z)%97===0&&Math.abs(x)>3&&Math.abs(z)>3)tree(x,h+1,z);}}
+function tree(x,y,z){for(let i=0;i<4;i++)addBlock(x,y+i,z,5);for(let dx=-2;dx<=2;dx++)for(let dz=-2;dz<=2;dz++)for(let dy=2;dy<=4;dy++){if(Math.abs(dx)+Math.abs(dz)+Math.abs(dy-3)<=4&&Math.random()>.12)addBlock(x+dx,y+dy,z+dz,0);}}
+terrain();
+const player={pos:new THREE.Vector3(0,3,0),vel:new THREE.Vector3(),yaw:0,pitch:0,onGround:false};camera.position.copy(player.pos);
+const keys={},ray=new THREE.Raycaster();let selected=0,locked=false,chatOpen=false,lastSend=0;
+const hotbar=document.querySelector('#hotbar');names.forEach((n,i)=>{let d=document.createElement('div');d.className='slot'+(i===0?' active':'');d.innerHTML=`<div class="swatch" style="background:#${mats[i].toString(16).padStart(6,'0')}"></div><span>${i+1} ${n}</span>`;hotbar.appendChild(d)});
+function select(n){selected=(n+6)%6;[...hotbar.children].forEach((e,i)=>e.classList.toggle('active',i===selected));}
+function msg(s){let d=document.createElement('div');d.textContent=s;document.querySelector('#messages').appendChild(d);while(document.querySelector('#messages').children.length>6)document.querySelector('#messages').firstChild.remove();}
+function toast(s){toastEl.textContent=s;toastEl.style.opacity=1;clearTimeout(toast.timer);toast.timer=setTimeout(()=>toastEl.style.opacity=0,2200)}
+function setStatus(s){status.textContent=s}
+function broadcast(data){if(!connected)return;data.room=roomName;data.from=peer.id; if(host){for(let c of peers.values())if(c.open)c.send(data)}else if(peers.get('host')?.open)peers.get('host').send(data);}
+function connectPeer(isHost){if(peer){peer.destroy();peer=null}for(let c of peers.values())try{c.close()}catch{}peers.clear();host=isHost;roomName=document.querySelector('#room').value.trim().toLowerCase().replace(/[^a-z0-9-_]/g,'').slice(0,18);if(!roomName){toast('Enter a room code');return}if(!window.Peer){toast('PeerJS did not load. Check your internet connection.');return}
+setStatus('Connecting…');connected=false;
+peer=new Peer(isHost?'blockworld-'+roomName:undefined);
+peer.on('error',e=>{setStatus('Connection error');toast(e.type==='unavailable-id'?'Room code already in use. Try another.':e.type);});
+peer.on('open',id=>{if(isHost){connected=true;setStatus('Hosting '+roomName);msg('Room hosted: '+roomName)}else{let c=peer.connect('blockworld-'+roomName,{reliable:true});setupConn(c,'host');setStatus('Joining '+roomName)}});
+if(isHost)peer.on('connection',c=>setupConn(c,c.peer));
+}
+function setupConn(c,id){peers.set(id,c);c.on('open',()=>{if(host){c.send({t:'welcome',id:peer.id,room:roomName,blocks:[...blocks.entries()],players:[...remote.entries()]});msg('Player connected')}else if(id==='host'){connected=true;setStatus('Connected: '+roomName);c.send({t:'hello',name:'Player'});msg('Connected to room')}});
+c.on('data',d=>{if(!d||d.room&&d.room!==roomName)return;if(host){if(d.t==='hello'){remote.set(c.peer,{pos:[0,3,0],name:d.name||'Player'});c.send({t:'welcome',id:peer.id,room:roomName,blocks:[...blocks.entries()],players:[...remote.entries()]});broadcast({t:'player',id:c.peer,pos:[0,3,0],name:d.name||'Player'});}else if(d.t==='state'){remote.set(c.peer,{pos:d.pos,yaw:d.yaw,name:d.name||'Player'});broadcast({...d,id:c.peer});}else if(d.t==='block'||d.t==='remove'||d.t==='chat'){apply(d);broadcast({...d,from:c.peer});}}else{if(d.t==='welcome'){connected=true;setStatus('Connected: '+roomName);d.blocks?.forEach(([k,t])=>{let [x,y,z]=parse(k);addBlock(x,y,z,t)});d.players?.forEach(([id,p])=>makeRemote(id,p));msg('Welcome to '+roomName);}else apply(d)}});
+c.on('close',()=>{peers.delete(id);if(host){remote.delete(id);broadcast({t:'leave',id})}else if(id==='host'){connected=false;setStatus('Disconnected')}});}
+function apply(d){if(d.t==='block')addBlock(d.x,d.y,d.z,d.type);if(d.t==='remove')removeBlock(d.x,d.y,d.z);if(d.t==='player'||d.t==='state')makeRemote(d.id,{pos:d.pos,yaw:d.yaw,name:d.name});if(d.t==='leave'){removeRemote(d.id)}if(d.t==='chat')msg((d.name||'Player')+': '+d.text);}
+function makeRemote(id,p){if(!id||id===peer?.id)return;let r=remote.get(id);if(!r||!r.mesh){let mat=new THREE.MeshLambertMaterial({color:0x4f8cff});let body=new THREE.Mesh(new THREE.BoxGeometry(.65,1.6,.4),mat);body.position.y=.8;scene.add(body);let head=new THREE.Mesh(new THREE.BoxGeometry(.55,.55,.55),new THREE.MeshLambertMaterial({color:0xf2c6a0}));head.position.y=1.9;scene.add(head);r={mesh:body,head,name:p.name||'Player',pos:new THREE.Vector3()};remote.set(id,r);}if(p.pos)r.pos.set(...p.pos);r.mesh.position.set(r.pos.x,r.pos.y-.8,r.pos.z);r.head.position.set(r.pos.x,r.pos.y+.3,r.pos.z);r.mesh.rotation.y=p.yaw||0;}
+function removeRemote(id){let r=remote.get(id);if(r){scene.remove(r.mesh);scene.remove(r.head);remote.delete(id)}}
+document.querySelector('#host').onclick=()=>connectPeer(true);document.querySelector('#join').onclick=()=>connectPeer(false);
+document.querySelector('#start').onclick=()=>{lock.style.display='none';renderer.domElement.requestPointerLock?.();};
+renderer.domElement.addEventListener('click',()=>{if(!chatOpen&&lock.style.display==='none')renderer.domElement.requestPointerLock?.()});
+document.addEventListener('pointerlockchange',()=>locked=document.pointerLockElement===renderer.domElement);
+document.addEventListener('mousemove',e=>{if(locked){player.yaw-=e.movementX*.002;player.pitch-=e.movementY*.002;player.pitch=Math.max(-1.5,Math.min(1.5,player.pitch));}});
+document.addEventListener('keydown',e=>{if(e.code==='Enter'){if(chatOpen){let inp=document.querySelector('#chatinput');if(inp.value.trim())broadcast({t:'chat',text:inp.value.trim(),name:'Player'}),msg('You: '+inp.value.trim());inp.value='';inp.style.display='none';chatOpen=false;}else{chatOpen=true;let inp=document.querySelector('#chatinput');inp.style.display='block';inp.focus();document.exitPointerLock?.()}e.preventDefault();return}if(chatOpen)return;keys[e.code]=true;if(e.code.startsWith('Digit'))select(Number(e.code.slice(5))-1);if(e.code==='Escape')locked=false;});
+document.addEventListener('keyup',e=>keys[e.code]=false);
+document.querySelector('#chatinput').addEventListener('keydown',e=>{if(e.key==='Escape'){e.target.style.display='none';chatOpen=false;}});
+renderer.domElement.addEventListener('contextmenu',e=>e.preventDefault());
+renderer.domElement.addEventListener('mousedown',e=>{if(!locked||chatOpen)return;ray.setFromCamera(new THREE.Vector2(0,0),camera);let hits=ray.intersectObjects([...meshes.values()]);if(!hits.length)return;let p=hits[0].object.position;if(e.button===0){removeBlock(p.x,p.y,p.z,true)}else if(e.button===2){let n=hits[0].face.normal, x=Math.round(p.x+n.x),y=Math.round(p.y+n.y),z=Math.round(p.z+n.z);if(Math.abs(x-player.pos.x)<1.2&&Math.abs(z-player.pos.z)<1.2&&Math.abs(y-player.pos.y)<2)return;addBlock(x,y,z,selected,true)}});
+function collides(x,y,z){for(let xx=Math.floor(x-.3);xx<=Math.floor(x+.3);xx++)for(let yy=Math.floor(y-1.65);yy<=Math.floor(y);yy++)for(let zz=Math.floor(z-.3);zz<=Math.floor(z+.3);zz++)if(blocks.has(key(xx,yy,zz)))return true;return false}
+function update(dt){let speed=keys.ShiftLeft||keys.ShiftRight?8:5;let forward=(keys.KeyW?1:0)-(keys.KeyS?1:0),side=(keys.KeyD?1:0)-(keys.KeyA?1:0);let dir=new THREE.Vector3(side,0,-forward).normalize().applyAxisAngle(new THREE.Vector3(0,1,0),player.yaw);let nx=player.pos.x+dir.x*speed*dt,nz=player.pos.z+dir.z*speed*dt;if(!collides(nx,player.pos.y,player.pos.z))player.pos.x=nx;if(!collides(player.pos.x,player.pos.y,nz))player.pos.z=nz;
+if(keys.Space&&player.onGround){player.vel.y=8;player.onGround=false}player.vel.y-=20*dt;let ny=player.pos.y+player.vel.y*dt;if(collides(player.pos.x,ny,player.pos.z)){if(player.vel.y<0)player.onGround=true;player.vel.y=0}else player.onGround=false;player.pos.y=ny;if(player.pos.y< -15){player.pos.set(0,4,0);player.vel.y=0}
+camera.position.set(player.pos.x,player.pos.y-.15,player.pos.z);camera.rotation.order='YXZ';camera.rotation.y=player.yaw;camera.rotation.x=player.pitch;
+let now=performance.now();if(connected&&now-lastSend>70){lastSend=now;let d={t:'state',pos:[player.pos.x,player.pos.y,player.pos.z],yaw:player.yaw,name:'Player',room:roomName,from:peer.id};if(host){remote.set(peer.id,{pos:d.pos,name:'Player'});broadcast(d)}else peers.get('host')?.send(d)}
+}
+let last=performance.now();function loop(){requestAnimationFrame(loop);let now=performance.now(),dt=Math.min((now-last)/1000,.04);last=now;if(lock.style.display==='none'&&!chatOpen)update(dt);remote.forEach((r,id)=>{if(r.pos&&r.mesh){r.mesh.position.set(r.pos.x,r.pos.y-.8,r.pos.z);r.head.position.set(r.pos.x,r.pos.y+.3,r.pos.z)}});renderer.render(scene,camera)}loop();
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+})();
+</script>
+</body></html>
